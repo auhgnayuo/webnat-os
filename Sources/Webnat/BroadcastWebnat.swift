@@ -1,0 +1,188 @@
+//
+//  BroadcastWebnat.swift
+//  Webnat
+//
+//  Created by Auhgnayuo on 2024/12/9.
+//
+
+import Foundation
+
+/// 广播消息监听器类型定义
+///
+/// 用于监听广播事件的回调类型，监听函数会在主线程上以 block 调用方式被执行。
+///
+/// - Parameters:
+///   - param: 广播推送的参数，可以是任意可序列化的对象，若无参数则为 `nil`
+///   - connection: 消息来源的连接对象
+public typealias BroadcastBlockListener = @MainActor @Sendable @convention(block) (_ param: Sendable?,_ connection: Connection) -> Void
+
+/// BroadcastWebnat - 广播消息传递器
+///
+/// 实现发布-订阅（pub/sub）模式的消息传递机制。
+///
+/// **适用场景**：
+/// - 事件通知（如状态变更、数据更新等）
+/// - 一对多的消息分发
+/// - 不需要返回值的通知场景
+///
+/// **特点**：
+/// - 按事件名称分类管理监听器
+/// - 支持多个订阅者同时监听同一事件
+/// - 可以向指定连接或所有连接广播
+/// - 广播时不关心是否有订阅者的存在
+///
+/// **消息格式**：
+/// - 使用 `Message` 协议，包含 `broadcast` 字段
+/// - Message 格式：`{ from: string, to: string, broadcast: { name: string, param?: Sendable } }`
+///
+/// - Note: 这是内部类，不应直接使用，应通过 `Webnat` 类的 API 访问
+@MainActor
+class BroadcastWebnat {
+    
+    /// 广播事件监听器映射表
+    ///
+    /// key: 广播事件名称
+    /// value: 绑定在该事件名称上的监听器数组
+    private var listeners: [String: [Listener]] = [:]
+
+    /// 注册（订阅）广播消息
+    ///
+    /// 注册指定事件名称的监听器，当收到对应事件的广播时触发回调。
+    /// 若同一监听器对象已被注册，则会先移除后再添加，避免重复订阅。
+    ///
+    /// - Parameters:
+    ///   - name: 广播事件名称（字符串标识），用于标识不同的事件类型
+    ///   - listener: 接收到广播时的回调函数，当对应事件被广播时会被调用
+    func on(name: String, listener: @escaping BroadcastBlockListener) {
+        // 如果该事件名称还没有监听器，创建新的监听器数组
+        if listeners[name] == nil {
+            listeners[name] = []
+        }
+        
+        // 移除已存在的相同监听器（如果有的话，使用引用判等）
+        listeners[name]!.removeAll(where: { l in
+            guard let value = l.value as? BroadcastBlockListener else {
+                return false
+            }
+            return (value as AnyObject) === (listener as AnyObject)
+        })
+        
+        // 添加新的监听器
+        listeners[name]!.append(Listener(value: listener))
+    }
+    
+    /// 取消订阅广播消息
+    ///
+    /// 将指定事件名称下的特定监听器移除，使用引用相等性（===）进行匹配。
+    ///
+    /// - Parameters:
+    ///   - name: 广播事件名称
+    ///   - listener: 要移除的监听器（必须与注册时的引用完全相同）
+    func off(name: String, listener: BroadcastBlockListener) {
+        // 移除已存在的相同监听器（如果有的话）
+        listeners[name]!.removeAll(where: { l in
+            guard let value = l.value as? BroadcastBlockListener else {
+                return false
+            }
+            return (value as AnyObject) === (listener as AnyObject)
+        })
+    }
+    
+    /// 订阅广播异步流（Swift Concurrency）
+    ///
+    /// 通过异步流（AsyncStream）方式订阅广播事件。
+    /// 当对应事件被广播时，新的 `(Sendable?, Connection)` 元组会 yield 到流中。
+    /// 流关闭时，会自动注销相关监听器，避免内存泄漏。
+    ///
+    /// - Parameter name: 广播事件名称
+    /// - Returns: 监听广播事件的异步事件流（AsyncStream）
+    @available(iOS 13.0, *)
+    func listen(name: String) -> AsyncStream<(Sendable?, Connection)> {
+        return AsyncStream { continuation in
+            // 如果还没有监听器，创建一个监听器数组
+            if listeners[name] == nil {
+                listeners[name] = []
+            }
+            // 将 continuation 包装为 Listener 后注册
+            let l = Listener(value: continuation)
+            listeners[name]!.append(l)
+            // 当流被取消或终止时，自动注销监听器
+            continuation.onTermination = { [weak self] _ in
+                guard let self else {
+                    return
+                }
+                // 在主线程上处理注销
+                Task { @MainActor [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    listeners[name]?.removeAll(where: { $0 === l })
+                }
+            }
+        }
+    }
+    
+    /// 广播消息推送
+    ///
+    /// 将消息广播给指定连接或所有连接。
+    /// 若 `connection` 为 `nil`，则向所有当前活跃连接广播。
+    /// 使用 `Message` 类构造消息并发送。
+    ///
+    /// - Parameters:
+    ///   - name: 广播事件名称，用于标识事件类型
+    ///   - param: 广播参数，可以是任意可序列化的对象，可选。若无参数，则消息不携带 `param` 字段
+    ///   - connection: 目标连接（单个），若为 `nil` 则广播到所有连接
+    func broadcast(name: String, param: Sendable? = nil, connection: Connection? = nil) {
+        // 定义广播操作——使用 Message 类构造消息后通过 Connection.send 发送
+        guard let connection else {
+            return
+        }
+        
+        let message = Message.broadcast(to: connection.id, name: name, param: param)
+        connection.send(message)
+    }
+        
+    /// 连接打开（建立）时的回调
+    ///
+    /// 会将新连接添加到内部活跃连接列表，后续可向其广播。
+    ///
+    /// - Parameters:
+    ///   - connection: 新打开的连接对象（Connection 实例）
+    func onConnectionOpen(connection: Connection) {
+    }
+    
+    /// 连接关闭时的回调
+    ///
+    /// 会将已关闭的连接对象从活跃连接列表中移除，避免后续继续广播到其上。
+    ///
+    /// - Parameters:
+    ///   - connection: 已关闭的连接对象（Connection 实例）
+    func onConnectionClose(connection: Connection) {
+      
+    }
+    
+    /// 接收到广播消息时的回调
+    ///
+    /// 用于分发 Web 或 Native 侧收到的广播消息。
+    /// 按事件名称查找并依次回调所有已订阅的监听器（支持回调函数和 async stream）。
+    ///
+    /// - Parameters:
+    ///   - connection: 消息来源连接
+    ///   - message: 收到的消息（已解析的 `Message` 对象）
+    @MainActor
+    func onConnectionReceive(connection: Connection, message: Message) {
+        // 检查是否为 broadcast 消息
+        guard let broadcast = message.broadcast else {
+            return
+        }
+        // 根据事件名称分发触发所有相关的监听器（block 或 async stream）
+        let listeners = listeners[broadcast.name]
+        listeners?.forEach { listener in
+            if let l = listener.value as? BroadcastBlockListener {
+                l(broadcast.param, connection)
+            } else if #available(iOS 13.0, *), let l = listener.value as? AsyncStream<(Sendable?, Connection)>.Continuation {
+                l.yield((broadcast.param, connection))
+            }
+        }
+    }
+}
