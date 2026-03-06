@@ -51,7 +51,11 @@ public class Connection: NSObject, @unchecked Sendable {
     /// 在连接建立（open）时由 Web 端传递，包含连接的附加信息
     /// 例如：origin（来源）、isMainframe（是否为主框架）、frameInfo: WKFrameInfo
     public let attributes: [String: Any]?
-
+    
+    /// 当前连接的界面URL
+    ///
+    /// 在连接建立时当前的界面URL
+    public let url: URL?
     /// 连接是否已关闭
     ///
     /// 当连接关闭后，发送消息会立即返回错误
@@ -69,10 +73,12 @@ public class Connection: NSObject, @unchecked Sendable {
     /// - Parameters:
     ///   - id: 连接 ID，由 Web 端生成，用于唯一标识一个连接
     ///   - attributes: 连接元数据，例如 source origin、frame 类型等，可以为 nil
+    ///   - url: 当前界面的url
     ///   - sendMessage: 消息发送函数，负责具体实现消息发送逻辑的闭包
-    init(id: String, attributes: [String: Any]?, sendMessage: @escaping SendMessage) {
+    init(id: String, attributes: [String: Any]?, url: URL?, sendMessage: @escaping SendMessage) {
         self.id = id
         self.attributes = attributes
+        self.url = url
         self.sendMessage = sendMessage
         super.init()
     }

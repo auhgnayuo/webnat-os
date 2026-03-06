@@ -523,7 +523,7 @@ public class Webnat: NSObject {
             }
             
             // 创建新的 Connection 实例
-            let connection = Connection(id: from, attributes: attributes) { [weak self, weak webView] messageToSend, completion in
+            let connection = Connection(id: from, attributes: attributes, url: webView.url) { [weak self, weak webView] messageToSend, completion in
                 guard let self, let webView = webView else {
                     completion?(NSError.closed())
                     return
