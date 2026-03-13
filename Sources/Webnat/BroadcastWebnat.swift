@@ -45,6 +45,12 @@ class BroadcastWebnat {
     /// value: 绑定在该事件名称上的监听器数组
     private var listeners: [String: [Listener]] = [:]
 
+    /// 判断包装的 value 是否与给定的 block 监听器为同一引用
+    private func isSameBlock(_ wrapper: Listener, as listener: BroadcastBlockListener) -> Bool {
+        guard let value = wrapper.value as? BroadcastBlockListener else { return false }
+        return (value as AnyObject) === (listener as AnyObject)
+    }
+
     /// 注册（订阅）广播消息
     ///
     /// 注册指定事件名称的监听器，当收到对应事件的广播时触发回调。
@@ -60,12 +66,7 @@ class BroadcastWebnat {
         }
         
         // 移除已存在的相同监听器（如果有的话，使用引用判等）
-        listeners[name]!.removeAll(where: { l in
-            guard let value = l.value as? BroadcastBlockListener else {
-                return false
-            }
-            return (value as AnyObject) === (listener as AnyObject)
-        })
+        listeners[name]!.removeAll { isSameBlock($0, as: listener) }
         
         // 添加新的监听器
         listeners[name]!.append(Listener(value: listener))
@@ -74,18 +75,16 @@ class BroadcastWebnat {
     /// 取消订阅广播消息
     ///
     /// 将指定事件名称下的特定监听器移除，使用引用相等性（===）进行匹配。
+    /// 若该事件下已无监听器，会移除对应 key，避免空数组残留。
     ///
     /// - Parameters:
     ///   - name: 广播事件名称
     ///   - listener: 要移除的监听器（必须与注册时的引用完全相同）
     func off(name: String, listener: BroadcastBlockListener) {
-        // 移除已存在的相同监听器（如果有的话）
-        listeners[name]!.removeAll(where: { l in
-            guard let value = l.value as? BroadcastBlockListener else {
-                return false
-            }
-            return (value as AnyObject) === (listener as AnyObject)
-        })
+        listeners[name]?.removeAll { isSameBlock($0, as: listener) }
+        if listeners[name]?.isEmpty == true {
+            listeners.removeValue(forKey: name)
+        }
     }
     
     /// 订阅广播异步流（Swift Concurrency）
